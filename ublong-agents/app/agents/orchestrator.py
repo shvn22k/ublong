@@ -1,10 +1,9 @@
 import asyncio
 import contextvars
 import uuid
-from datetime import datetime, timezone
-from typing import TypedDict, Optional, AsyncIterator
+from typing import TypedDict, Optional
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 
 from app.models.case import CaseInput, AgentEvent, CaseResult
 from app.agents.intake_agent import run_intake_agent, IntakeResult
@@ -12,7 +11,7 @@ from app.agents.research_agent import run_research_agent, ResearchResult
 from app.agents.gap_analysis_agent import run_gap_analysis_agent, GapResult
 from app.utils.streaming import emit
 
-# Contextvar carries the live queue into each LangGraph node without polluting state.
+# Carries the live queue into each LangGraph node without polluting state.
 _queue_ctx: contextvars.ContextVar[asyncio.Queue] = contextvars.ContextVar("pipeline_queue")
 
 
@@ -21,27 +20,17 @@ class AgentState(TypedDict):
     intake_result: Optional[IntakeResult]
     research_result: Optional[ResearchResult]
     gap_result: Optional[GapResult]
+    events: list[AgentEvent]
+    final_result: Optional[CaseResult]
     error: Optional[str]
 
 
-# ── LangGraph nodes ───────────────────────────────────────────────────────────
+# ── Nodes ─────────────────────────────────────────────────────────────────────
 
 async def intake_node(state: AgentState) -> dict:
     queue = _queue_ctx.get()
     result = await run_intake_agent(state["case_input"], queue)
     return {"intake_result": result}
-
-
-async def human_review_node(state: AgentState) -> dict:
-    queue = _queue_ctx.get()
-    score = state["intake_result"].complexity_score  # type: ignore[union-attr]
-    await emit(
-        queue,
-        "thinking",
-        "orchestrator",
-        f"⚠️ High complexity case (score {score}/5) — flagged for human expert review before proceeding.",
-    )
-    return {}
 
 
 async def research_node(state: AgentState) -> dict:
@@ -56,30 +45,83 @@ async def gap_analysis_node(state: AgentState) -> dict:
     return {"gap_result": result}
 
 
-def _route_after_intake(state: AgentState) -> str:
+async def flag_review_node(state: AgentState) -> dict:
+    queue = _queue_ctx.get()
+    score = state["intake_result"].complexity_score  # type: ignore[union-attr]
+    await emit(
+        queue,
+        "thinking",
+        "orchestrator",
+        f"⚠️ High complexity case (score {score}/5) — flagged for human expert review.",
+    )
+    return {}
+
+
+async def assemble_node(state: AgentState) -> dict:
+    intake: IntakeResult = state["intake_result"]  # type: ignore[assignment]
+    research: ResearchResult = state["research_result"]  # type: ignore[assignment]
+    gap: GapResult = state["gap_result"]  # type: ignore[assignment]
+
+    legal_pathway = "\n".join(
+        f"{i + 1}. {step}" for i, step in enumerate(research.pathway_steps)
+    )
+
+    first_sentence = research.legal_basis.split(".")[0].strip()
+    submission_office = (first_sentence + ".") if first_sentence else "See local civil registration authority."
+
+    truly_blocked = gap.truly_blocked
+    confidence = round(1.0 - (len(truly_blocked) / max(len(research.required_docs), 1)), 2)
+
+    flag_bullets = "\n".join(f"• {f}" for f in intake.flags)
+    flag_note = (
+        "\n⚠️ This case has been flagged for human expert review due to high complexity."
+        if intake.complexity_score > 4
+        else ""
+    )
+
+    result = CaseResult(
+        case_id=str(uuid.uuid4()),
+        legal_pathway=legal_pathway,
+        required_documents=research.required_docs,
+        available_substitutes=gap.covered_by_substitutes,
+        missing_documents=truly_blocked,
+        submission_office=submission_office,
+        estimated_timeline="4–8 weeks depending on document availability.",
+        cover_letter_draft=gap.cover_letter,
+        confidence_score=confidence,
+        country_specific_notes=flag_bullets + flag_note,
+    )
+    return {"final_result": result}
+
+
+# ── Routing ───────────────────────────────────────────────────────────────────
+
+def _route_after_gap(state: AgentState) -> str:
     intake = state.get("intake_result")
     if intake and intake.complexity_score > 4:
-        return "human_review"
-    return "research"
+        return "flag_review"
+    return "assemble"
 
 
 # ── Build graph ───────────────────────────────────────────────────────────────
 
-def _build_graph() -> "CompiledGraph":  # type: ignore[name-defined]
+def _build_graph():
     wf = StateGraph(AgentState)
     wf.add_node("intake", intake_node)
-    wf.add_node("human_review", human_review_node)
     wf.add_node("research", research_node)
     wf.add_node("gap_analysis", gap_analysis_node)
+    wf.add_node("flag_review", flag_review_node)
+    wf.add_node("assemble", assemble_node)
 
-    wf.set_entry_point("intake")
-    wf.add_conditional_edges("intake", _route_after_intake, {
-        "human_review": "human_review",
-        "research": "research",
-    })
-    wf.add_edge("human_review", "research")
+    wf.add_edge(START, "intake")
+    wf.add_edge("intake", "research")
     wf.add_edge("research", "gap_analysis")
-    wf.add_edge("gap_analysis", END)
+    wf.add_conditional_edges("gap_analysis", _route_after_gap, {
+        "flag_review": "flag_review",
+        "assemble": "assemble",
+    })
+    wf.add_edge("flag_review", "assemble")
+    wf.add_edge("assemble", END)
 
     return wf.compile()
 
@@ -89,67 +131,63 @@ _PIPELINE = _build_graph()
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def run_pipeline(case_input: CaseInput) -> AsyncIterator[AgentEvent]:
-    queue: asyncio.Queue = asyncio.Queue()
-    _SENTINEL = object()
+async def run_pipeline(case_input: CaseInput, event_queue: asyncio.Queue) -> CaseResult:
+    _queue_ctx.set(event_queue)
 
-    # Set contextvar before create_task so the task inherits it.
-    _queue_ctx.set(queue)
+    initial: AgentState = {
+        "case_input": case_input,
+        "intake_result": None,
+        "research_result": None,
+        "gap_result": None,
+        "events": [],
+        "final_result": None,
+        "error": None,
+    }
 
-    async def _run() -> None:
+    try:
+        final = await _PIPELINE.ainvoke(initial)
+        return final["final_result"]
+    except Exception as exc:
+        await emit(event_queue, "error", "orchestrator", f"Pipeline error: {exc}")
+        raise
+
+
+# ── Manual test ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    async def _main():
+        queue: asyncio.Queue = asyncio.Queue()
+        _SENTINEL = object()
+
+        async def _drain():
+            while True:
+                item = await queue.get()
+                if item is _SENTINEL:
+                    break
+                print(f"[{item.event_type.upper()}] ({item.agent_name}): {item.content[:120]}")
+
+        drain_task = asyncio.create_task(_drain())
+
+        case = CaseInput(
+            child_birth_country="Myanmar",
+            child_birth_date="2023-01-15",
+            child_current_country="Bangladesh",
+            father_nationality="Rohingya (stateless)",
+            mother_nationality="Rohingya (stateless)",
+            parents_documents_held=[],
+            child_age_months=18,
+            additional_context="Rohingya child born in Cox's Bazar refugee camp; parents hold UNHCR documentation only.",
+        )
+
         try:
-            initial: AgentState = {
-                "case_input": case_input,
-                "intake_result": None,
-                "research_result": None,
-                "gap_result": None,
-                "error": None,
-            }
-            final = await _PIPELINE.ainvoke(initial)
-
-            intake: IntakeResult | None = final.get("intake_result")
-            research: ResearchResult | None = final.get("research_result")
-            gap: GapResult | None = final.get("gap_result")
-
-            confidence = round(
-                max(0.3, 0.9 - 0.1 * ((intake.complexity_score - 1) if intake else 2)), 2
-            )
-
-            case_result = CaseResult(
-                case_id=str(uuid.uuid4()),
-                legal_pathway="\n".join(research.pathway_steps) if research else "No pathway available.",
-                required_documents=research.required_docs if research else [],
-                available_substitutes=list(research.substitutes.values()) if research else [],
-                missing_documents=gap.missing_docs if gap else [],
-                submission_office="See country-specific civil registration authority.",
-                estimated_timeline="4–8 weeks depending on document availability.",
-                cover_letter_draft=gap.cover_letter if gap else "",
-                confidence_score=confidence,
-                country_specific_notes=research.legal_basis if research else "",
-            )
-
-            await queue.put(AgentEvent(
-                event_type="result",
-                agent_name="orchestrator",
-                content=case_result.model_dump_json(),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            ))
+            result = await run_pipeline(case, queue)
+            print("\n=== FINAL RESULT ===")
+            print(result.model_dump_json(indent=2))
         except Exception as exc:
-            await queue.put(AgentEvent(
-                event_type="error",
-                agent_name="orchestrator",
-                content=f"Pipeline error: {exc}",
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            ))
+            print(f"Pipeline failed: {exc}")
         finally:
             await queue.put(_SENTINEL)
 
-    task = asyncio.create_task(_run())
+        await drain_task
 
-    while True:
-        item = await queue.get()
-        if item is _SENTINEL:
-            break
-        yield item  # type: ignore[misc]
-
-    await task
+    asyncio.run(_main())
