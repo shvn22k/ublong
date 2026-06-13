@@ -73,8 +73,8 @@ The three services were built in parallel and are at different integration depth
 - **agents ↔ backend** — wired and contract-aligned. The backend relays the agents' SSE stream and stores the result. Defaults to a self-contained mock pipeline so the backend is fully usable without the Python service or an OpenAI key.
 - **frontend** — currently a **standalone, self-contained demo**. The pipeline animation is client-side (`runCaseSimulation` in `ublong-frontend/src/context/AppContext.tsx`); it does **not** yet call the backend. Wiring it to the backend (auth → `POST /cases` → SSE → results) is the remaining integration task.
 
-### Known content gap
-`ublong-agents/data/legal_docs/` ships empty. The research agent runs but has no jurisdiction-specific legal context until `BD.md` / `LB.md` / `KE.md` are added — the RAG layer degrades gracefully to general principles.
+### Legal knowledge base
+`ublong-agents/data/legal_docs/` ships with `BD.md`, `LB.md`, and `KE.md` — caseworker-reference legal guidance for Bangladesh, Lebanon, and Kenya. On startup the agents service chunks and embeds these into ChromaDB; the research agent retrieves the top-k chunks filtered by country. Add a new country by dropping in another `XX.md` file. (These are simplified operational references for triage, not legal advice.)
 
 ---
 
