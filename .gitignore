@@ -68,6 +68,15 @@ pnpm-debug.log*
 .pnpm-store/
 .npm/
 
+# === Next.js / frontend build ===
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# === RAG / vector store (auto-generated) ===
+ublong-agents/data/chroma_db/
+
 # === IDEs & editors ===
 .vscode/
 .idea/

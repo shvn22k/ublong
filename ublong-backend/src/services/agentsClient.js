@@ -64,10 +64,24 @@ async function processCase(intake, res, onComplete) {
       if (!raw) continue;
 
       try {
+        // The Python agents service emits AgentEvent objects:
+        //   { event_type: "thinking" | "result" | "error", agent_name, content, timestamp }
+        // The final "result" event carries the CaseResult as a JSON string in `content`.
+        // Translate them into the { type, agent, message, data } shape the client expects.
         const event = JSON.parse(raw);
-        sendSSE(res, event);
-        if (event.type === "result") {
-          finalResult = event.data;
+
+        if (event.event_type === "result") {
+          const result = JSON.parse(event.content);
+          finalResult = result;
+          sendSSE(res, { type: "result", data: result });
+        } else if (event.event_type === "error") {
+          sendSSE(res, { type: "error", agent: event.agent_name, message: event.content });
+        } else {
+          sendSSE(res, {
+            type: "agent_thinking",
+            agent: event.agent_name,
+            message: event.content,
+          });
         }
       } catch {
         // skip malformed chunks
