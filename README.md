@@ -45,12 +45,17 @@ uvicorn main:app --reload
 ```
 Then set `USE_MOCK_AGENTS=false` in the backend `.env` to route cases through the real agents.
 
-### 4. Frontend (port 3000)
+### 4. Frontend (port 3001)
 ```bash
 cd ublong-frontend
+cp .env.local.example .env.local   # NEXT_PUBLIC_API_URL — defaults to http://localhost:3000
 npm install
 npm run dev
 ```
+The frontend runs on **port 3001** (the backend owns 3000). Open <http://localhost:3001>, scroll to
+**Child Registration Intake**, fill the form, and submit — the intake form POSTs to the backend and
+streams the live agent run + final result. The backend's `.env.example` ships with `DEMO_MODE=true`,
+so no login is required (it uses the seeded demo caseworker). Run `npm run seed` in the backend first.
 
 ---
 
@@ -68,10 +73,11 @@ npm run dev
 
 ## Current integration status (read this)
 
-The three services were built in parallel and are at different integration depths:
+All three services are now wired end to end:
 
-- **agents ↔ backend** — wired and contract-aligned. The backend relays the agents' SSE stream and stores the result. Defaults to a self-contained mock pipeline so the backend is fully usable without the Python service or an OpenAI key.
-- **frontend** — currently a **standalone, self-contained demo**. The pipeline animation is client-side (`runCaseSimulation` in `ublong-frontend/src/context/AppContext.tsx`); it does **not** yet call the backend. Wiring it to the backend (auth → `POST /cases` → SSE → results) is the remaining integration task.
+- **agents ↔ backend** — contract-aligned. The backend relays the agents' SSE stream and stores the result. Defaults to a self-contained mock pipeline, so it is fully usable without the Python service or an OpenAI key.
+- **frontend ↔ backend** — the **Child Registration Intake** form POSTs to `POST /cases`, then consumes `POST /cases/:id/process` as a live SSE stream ([src/lib/api.ts](ublong-frontend/src/lib/api.ts)), rendering each agent's progress and the final `CaseResult` ([src/components/CaseResultView.tsx](ublong-frontend/src/components/CaseResultView.tsx)). Auth is bypassed via `DEMO_MODE`.
+- The marketing sections (Hero, "Mission Control" showcase, maps, stories) remain a standalone animated demo and are intentionally not backend-driven.
 
 ### Legal knowledge base
 `ublong-agents/data/legal_docs/` ships with `BD.md`, `LB.md`, and `KE.md` — caseworker-reference legal guidance for Bangladesh, Lebanon, and Kenya. On startup the agents service chunks and embeds these into ChromaDB; the research agent retrieves the top-k chunks filtered by country. Add a new country by dropping in another `XX.md` file. (These are simplified operational references for triage, not legal advice.)

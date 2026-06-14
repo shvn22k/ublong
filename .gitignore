@@ -29,8 +29,6 @@ dist/
 build/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 var/
 sdist/
@@ -54,6 +52,7 @@ coverage.xml
 .env
 .env.*
 !.env.example
+!.env.local.example
 .venv/
 venv/
 env/
