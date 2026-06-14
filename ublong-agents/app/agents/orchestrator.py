@@ -72,12 +72,9 @@ async def assemble_node(state: AgentState) -> dict:
     truly_blocked = gap.truly_blocked
     confidence = round(1.0 - (len(truly_blocked) / max(len(research.required_docs), 1)), 2)
 
-    flag_bullets = "\n".join(f"• {f}" for f in intake.flags)
-    flag_note = (
-        "\n⚠️ This case has been flagged for human expert review due to high complexity."
-        if intake.complexity_score > 4
-        else ""
-    )
+    notes = list(intake.flags)
+    if intake.complexity_score > 4:
+        notes.append("FLAGGED FOR HUMAN LEGAL REVIEW — complexity score exceeds threshold")
 
     result = CaseResult(
         case_id=str(uuid.uuid4()),
@@ -89,7 +86,20 @@ async def assemble_node(state: AgentState) -> dict:
         estimated_timeline="4–8 weeks depending on document availability.",
         cover_letter_draft=gap.cover_letter,
         confidence_score=confidence,
-        country_specific_notes=flag_bullets + flag_note,
+        country_specific_notes=notes,
+        intake_summary={
+            "jurisdiction": intake.jurisdiction,
+            "case_type": intake.case_type,
+            "flags": intake.flags,
+            "complexity_score": intake.complexity_score,
+        },
+        research_summary={
+            "legal_basis": research.legal_basis,
+            "substitutes": research.substitutes,
+        },
+        gap_summary={
+            "recommendation": gap.recommendation,
+        },
     )
     return {"final_result": result}
 
