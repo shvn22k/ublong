@@ -5,6 +5,11 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:3000";
 
+// Demo mode: run the whole pipeline client-side with mock data (no backend,
+// Mongo, or OpenAI). Default ON so a fresh checkout records a working demo with
+// zero setup. Set NEXT_PUBLIC_USE_MOCK=false to hit the real backend.
+export const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK !== "false";
+
 // Intake payload — the backend's normalizeIntake accepts these camelCase keys
 // and maps them to the agents' CaseInput.
 export interface CaseIntake {
@@ -135,6 +140,11 @@ export async function submitAndProcess(
   onEvent: (ev: StreamEvent) => void,
   signal?: AbortSignal
 ): Promise<CaseResult | null> {
+  if (USE_MOCK) {
+    // Lazy import so the mock data is only pulled in when needed.
+    const { runMockPipeline } = await import("./mockPipeline");
+    return runMockPipeline(intake, onEvent, signal);
+  }
   const caseDoc = await createCase(intake);
   return processCase(caseDoc._id, onEvent, signal);
 }

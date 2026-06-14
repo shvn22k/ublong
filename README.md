@@ -16,6 +16,19 @@ ublong/
 
 ---
 
+## Demo mode (frontend only — no backend needed)
+
+For a screen-recorded demo you can run **just the frontend**. It ships with `NEXT_PUBLIC_USE_MOCK=true` (the default), which runs the entire pipeline client-side with mock data — no backend, MongoDB, Docker, or OpenAI key.
+
+```bash
+cd ublong-frontend
+npm install
+npm run dev          # http://localhost:3001
+```
+Open the site → **Child Registration Intake** → fill the form (try **Current Country: Bangladesh**, location "Kutupalong Camp, Cox's Bazar") → Submit. You'll see the live agent stream and a full result (pathway, document gaps, cover letter). Set `NEXT_PUBLIC_USE_MOCK=false` to drive the real backend instead (see below).
+
+---
+
 ## Quick start
 
 ### 0. Prerequisites
